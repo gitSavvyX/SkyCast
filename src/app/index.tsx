@@ -7,6 +7,7 @@ import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const FAVORITES_KEY = '@skycast_favorites';
+const CACHE_KEY = '@skycast_cache';
 
 export default function App() {
   const [weather, setWeather] = useState<WeatherData | null>(null);
@@ -14,24 +15,21 @@ export default function App() {
   const [currentCity, setCurrentCity] = useState<GeocodingResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [isCached, setIsCached] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState('');
   
-  // Favorites State
   const [favorites, setFavorites] = useState<GeocodingResult[]>([]);
 
-  // Load favorites on startup
   useEffect(() => {
     loadFavorites();
+    loadCache(); // Load offline data if app opens with no internet
   }, []);
 
   const loadFavorites = async () => {
     try {
       const stored = await AsyncStorage.getItem(FAVORITES_KEY);
-      if (stored) {
-        setFavorites(JSON.parse(stored));
-      }
-    } catch (e) {
-      console.error("Failed to load favorites");
-    }
+      if (stored) setFavorites(JSON.parse(stored));
+    } catch (e) { console.error("Failed to load favorites"); }
   };
 
   const saveFavoritesToStorage = async (newFavs: GeocodingResult[]) => {
@@ -41,48 +39,69 @@ export default function App() {
 
   const toggleFavorite = () => {
     if (!currentCity) return;
-    
     const isFav = favorites.some(f => f.id === currentCity.id);
-    let newFavs;
-    
-    if (isFav) {
-      newFavs = favorites.filter(f => f.id !== currentCity.id);
-    } else {
-      newFavs = [...favorites, currentCity];
-    }
+    const newFavs = isFav ? favorites.filter(f => f.id !== currentCity.id) : [...favorites, currentCity];
     saveFavoritesToStorage(newFavs);
+  };
+
+  const loadCache = async () => {
+    try {
+      const cached = await AsyncStorage.getItem(CACHE_KEY);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        setWeather(parsed.weather);
+        setCurrentCity(parsed.city);
+        setLastUpdated(parsed.timestamp);
+        setIsCached(true);
+      }
+    } catch (e) { console.error("Failed to load cache"); }
+  };
+
+  const saveToCache = async (data: WeatherData, city: GeocodingResult) => {
+    const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const cacheData = { weather: data, city, timestamp };
+    await AsyncStorage.setItem(CACHE_KEY, JSON.stringify(cacheData));
+    setLastUpdated(timestamp);
+    setIsCached(false);
   };
 
   const fetchWeatherForCity = async (location: GeocodingResult) => {
     setLoading(true);
     setErrorMsg('');
-    setWeather(null);
     
-    const data = await getWeather(location.latitude, location.longitude);
-    if (data) {
-      setWeather(data);
-      setCurrentCity(location);
-    } else {
-      setErrorMsg('Failed to fetch weather data.');
+    try {
+      const data = await getWeather(location.latitude, location.longitude);
+      if (data) {
+        setWeather(data);
+        setCurrentCity(location);
+        await saveToCache(data, location);
+      } else {
+        throw new Error("No data");
+      }
+    } catch (error) {
+      setErrorMsg('Network failed. Showing cached data.');
+      loadCache(); // Fallback to cache if network fails
     }
     setLoading(false);
   };
 
   const handleSearch = async () => {
     if (!cityName.trim()) return;
-    
     Keyboard.dismiss();
     setLoading(true);
     setErrorMsg('');
-    setWeather(null);
-
-    const location = await searchCity(cityName);
     
-    if (location) {
-      await fetchWeatherForCity(location);
-      setCityName(''); // Clear search bar after success
-    } else {
-      setErrorMsg('City not found. Please check spelling.');
+    try {
+      const location = await searchCity(cityName);
+      if (location) {
+        await fetchWeatherForCity(location);
+        setCityName('');
+      } else {
+        setErrorMsg('City not found. Please check spelling.');
+        setLoading(false);
+      }
+    } catch (error) {
+      setErrorMsg('Network error. Please check internet.');
       setLoading(false);
     }
   };
@@ -110,7 +129,6 @@ export default function App() {
         </TouchableOpacity>
       </View>
 
-      {/* Favorites Row */}
       {favorites.length > 0 && (
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.favoritesRow}>
           {favorites.map((fav) => (
@@ -129,8 +147,8 @@ export default function App() {
       )}
 
       {errorMsg ? (
-        <View style={styles.center}>
-          <Ionicons name="cloud-offline" size={60} color="#FCA5A5" />
+        <View style={styles.errorBanner}>
+          <Ionicons name="warning" size={20} color="#FCA5A5" />
           <Text style={styles.errorText}>{errorMsg}</Text>
         </View>
       ) : null}
@@ -146,6 +164,14 @@ export default function App() {
             </View>
             <Text style={styles.tempText}>{weather.current_weather.temperature}°C</Text>
             <Text style={styles.windText}>Wind: {weather.current_weather.windspeed} km/h</Text>
+            
+            {/* Last Updated Indicator */}
+            <View style={styles.cacheBadge}>
+              <Ionicons name={isCached ? "cloud-offline" : "time"} size={14} color={isCached ? "#FCA5A5" : "#A5B4FC"} />
+              <Text style={[styles.cacheText, isCached && { color: '#FCA5A5' }]}>
+                {isCached ? `Offline (Cached at ${lastUpdated})` : `Updated at ${lastUpdated}`}
+              </Text>
+            </View>
           </View>
 
           <View style={styles.forecastContainer}>
@@ -184,7 +210,8 @@ const styles = StyleSheet.create({
   favText: { color: '#FFF', fontWeight: '600' },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center', marginTop: 50 },
   loadingText: { color: '#FFF', marginTop: 10, fontSize: 16 },
-  errorText: { color: '#FCA5A5', marginTop: 15, fontSize: 18, textAlign: 'center', fontWeight: 'bold' },
+  errorBanner: { flexDirection: 'row', backgroundColor: 'rgba(220, 38, 38, 0.2)', padding: 12, borderRadius: 10, marginBottom: 15, alignItems: 'center' },
+  errorText: { color: '#FCA5A5', marginLeft: 10, fontSize: 14, fontWeight: 'bold' },
   emptyText: { color: '#A5B4FC', marginTop: 15, fontSize: 16, textAlign: 'center' },
   scrollContent: { paddingBottom: 40 },
   currentCard: { alignItems: 'center', marginBottom: 30, marginTop: 10 },
@@ -192,6 +219,8 @@ const styles = StyleSheet.create({
   cityText: { color: '#FFF', fontSize: 24, fontWeight: '600' },
   tempText: { color: '#FFF', fontSize: 72, fontWeight: '800' },
   windText: { color: '#E0E7FF', fontSize: 16 },
+  cacheBadge: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.1)', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, marginTop: 10 },
+  cacheText: { color: '#A5B4FC', fontSize: 12, marginLeft: 6, fontWeight: '600' },
   forecastContainer: { backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 20, padding: 20 },
   forecastTitle: { color: '#FFF', fontSize: 18, fontWeight: '700', marginBottom: 15 },
   forecastRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.1)' },

@@ -29,4 +29,4 @@ export const getWeather = async (lat: number, lon: number): Promise<WeatherData 
     console.error("Error fetching weather:", error);
     return null;
   }
-}
+};
